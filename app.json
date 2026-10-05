@@ -1,0 +1,64 @@
+{
+  "name": "KRITI AI VC BOT",
+  "description": "A Telegram AI Voice Chat Bot that joins voice calls and talks in natural female voice across multiple languages.",
+  "keywords": [
+    "telegram",
+    "voice-chat",
+    "ai-bot",
+    "pyrogram",
+    "pytgcalls",
+    "gemini-ai",
+    "multilingual"
+  ],
+  "website": "https://github.com/VBIT-BOT-ADDA/KRITIAIVCBOT",
+  "repository": "https://github.com/VBIT-BOT-ADDA/KRITIAIVCBOT",
+  "logo": "https://telegra.ph/file/0c977f6b0f55bbd1f2e13.jpg",
+  "success_url": "/",
+  "stack": "container",
+  "env": {
+    "API_ID": {
+      "description": "Your Telegram API ID from my.telegram.org",
+      "value": "",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Your Telegram API Hash from my.telegram.org",
+      "value": "",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token from @BotFather",
+      "value": "",
+      "required": true
+    },
+    "SESSION_STRING": {
+      "description": "Pyrogram String Session for the Userbot",
+      "value": "",
+      "required": true
+    },
+    "GEMINI_API_KEY": {
+      "description": "Google Gemini API Key from aistudio.google.com",
+      "value": "",
+      "required": true
+    },
+    "GROQ_API_KEY": {
+      "description": "Groq API Key from console.groq.com",
+      "value": "",
+      "required": false
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    },
+    {
+      "url": "https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest.git"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  }
+}

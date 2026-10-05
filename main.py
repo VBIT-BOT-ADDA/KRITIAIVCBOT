@@ -3,6 +3,7 @@ import asyncio
 import threading
 import time
 import random
+import traceback
 
 # Pyrogram 2.0.106 has an old peer-id range check which can reject valid
 # modern Telegram supergroup IDs such as -1002299770478.
@@ -54,6 +55,8 @@ from pyrogram.types import (
 
 from pytgcalls import GroupCallFactory
 
+import config as config_module
+
 from config import (
     API_ID,
     API_HASH,
@@ -61,6 +64,10 @@ from config import (
     SESSION_STRING,
     GEMINI_API_KEY,
 )
+
+# Optional owner/startup notification. The bot still works if OWNER_ID
+# is not present in config.py.
+OWNER_ID = getattr(config_module, "OWNER_ID", None)
 
 from voice_engine import voice_engine
 
@@ -100,6 +107,8 @@ bot_client = Client(
 # ============================================================
 
 MAIN_LOOP = None
+BOT_READY = False
+USER_SESSION_READY = False
 
 
 # ============================================================
@@ -1145,6 +1154,13 @@ async def join_voice_chat(
         status_message = None
 
         try:
+            if not USER_SESSION_READY:
+                await message.reply_text(
+                    "❌ <b>SESSION_STRING user account is not connected.</b>\n\n"
+                    "The bot is online, but the configured user session could "
+                    "not be started. Check SESSION_STRING/API credentials in Heroku."
+                )
+                return
             if len(message.command) < 2:
                 await message.reply_text(
                     "❌ <b>Usage:</b>\n\n"
@@ -1431,97 +1447,136 @@ async def leave_voice_chat(
 # ============================================================
 
 async def main():
-
-    global MAIN_LOOP
+    """
+    Stable Heroku startup:
+    1. Start the BOT first so /start and help work immediately.
+    2. Start the SESSION_STRING user separately.
+    3. If the user session fails, keep the bot online and report the
+       problem from /joinvc instead of killing the whole worker.
+    """
+    global MAIN_LOOP, BOT_READY, USER_SESSION_READY
 
     MAIN_LOOP = asyncio.get_running_loop()
 
-
-    print(
-        "=========================================="
-    )
-
-    print(
-        "Starting Kriti AI VC Bot..."
-    )
-
-    print(
-        "✅ BOT STARTED SUCCESSFULLY - waiting for /start"
-    )
-
-    print(
-        "✅ Pyrogram modern -100 peer-id compatibility patch: ACTIVE"
-    )
-
-    print(
-        "=========================================="
-    )
-
+    print("==========================================", flush=True)
+    print("Starting Kriti AI VC Bot...", flush=True)
+    print("==========================================", flush=True)
 
     # --------------------------------------------------------
-    # Start user account
+    # START BOT FIRST
     # --------------------------------------------------------
+    try:
+        print("[STARTUP] Starting bot client...", flush=True)
+        await bot_client.start()
+        BOT_READY = True
 
-    await user_client.start()
+        bot_me = await bot_client.get_me()
+        print("==========================================", flush=True)
+        print("🤖 KRITIBOT STARTED SUCCESSFULLY", flush=True)
+        print("🚀 KRITIBOT STARTED - HEROKU WORKER ONLINE", flush=True)
+        print(
+            f"[STARTUP] BOT STARTED SUCCESSFULLY: @{bot_me.username} "
+            f"(ID {bot_me.id})",
+            flush=True,
+        )
+        print("==========================================", flush=True)
 
-    print(
-        "✅ User account started."
-    )
+        # Optional startup notification to OWNER_ID.
+        if OWNER_ID:
+            try:
+                await bot_client.send_message(
+                    int(OWNER_ID),
+                    "✅ <b>BOT STARTED SUCCESSFULLY</b>\n\n"
+                    "🤖 Kriti AI VC Bot is online.\n"
+                    "📚 Send /start to open Help & Commands.",
+                )
+                print(
+                    f"[STARTUP] Startup message sent to OWNER_ID={OWNER_ID}",
+                    flush=True,
+                )
+            except Exception as notify_error:
+                print(
+                    f"[STARTUP] Owner notification skipped: {notify_error}",
+                    flush=True,
+                )
 
+    except Exception as error:
+        print(
+            f"[FATAL] Bot client failed to start: {error}",
+            flush=True,
+        )
+        traceback.print_exc()
+        raise
 
     # --------------------------------------------------------
-    # Start bot
+    # START USER SESSION SECOND
     # --------------------------------------------------------
+    try:
+        print("[STARTUP] Starting SESSION_STRING user account...", flush=True)
+        await user_client.start()
+        USER_SESSION_READY = True
 
-    await bot_client.start()
+        user_me = await user_client.get_me()
+        print(
+            f"[STARTUP] USER SESSION STARTED SUCCESSFULLY: "
+            f"{user_me.first_name or ''} "
+            f"(@{user_me.username or 'no_username'}, ID {user_me.id})",
+            flush=True,
+        )
 
+    except Exception as error:
+        USER_SESSION_READY = False
+        print(
+            f"[STARTUP] USER SESSION FAILED, but BOT will stay online: {error}",
+            flush=True,
+        )
+        traceback.print_exc()
+        print(
+            "[STARTUP] /start and /help remain available. "
+            "/joinvc will report the SESSION_STRING problem until it is fixed.",
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # FINAL STATUS
+    # --------------------------------------------------------
+    print("==========================================", flush=True)
+    print("🤖 KRITIBOT STARTED SUCCESSFULLY", flush=True)
+    print("🤖 Kriti AI Automatic Voice Chat Bot", flush=True)
+    print(f"✅ Bot: {'ONLINE' if BOT_READY else 'OFFLINE'}", flush=True)
     print(
-        "✅ Bot account started."
+        f"👤 User Session: {'ONLINE' if USER_SESSION_READY else 'OFFLINE'}",
+        flush=True,
     )
+    print("🧠 Gemini AI: ACTIVE", flush=True)
+    print("🔊 Edge TTS: ACTIVE", flush=True)
+    print("🎙 Triggers: Hello Kriti / Hey Kriti / Hi Kriti / Kriti", flush=True)
+    print("📚 /start = Help & Commands", flush=True)
+    print("==========================================", flush=True)
 
+    # Keep the worker alive.
+    try:
+        await asyncio.Event().wait()
+    finally:
+        print("[SHUTDOWN] Shutdown signal received.", flush=True)
 
-    print(
-        "=========================================="
-    )
+        try:
+            if current_vc_chat_id is not None:
+                await group_call.stop()
+        except Exception as error:
+            print(f"[SHUTDOWN] VC stop error: {error}", flush=True)
 
-    print(
-        "🤖 Kriti AI Automatic Voice Chat Bot"
-    )
+        try:
+            if USER_SESSION_READY:
+                await user_client.stop()
+        except Exception as error:
+            print(f"[SHUTDOWN] User client stop error: {error}", flush=True)
 
-    print(
-        "🎙 Voice detection: ACTIVE"
-    )
-
-    print(
-        "🧠 Gemini STT: ACTIVE"
-    )
-
-    print(
-        "🧠 Gemini AI: ACTIVE"
-    )
-
-    print(
-        "🔊 Edge TTS: ACTIVE"
-    )
-
-    print(
-        "=========================================="
-    )
-
-    print(
-        "Waiting for:"
-    )
-
-    print(
-        "Hello Kriti / Hey Kriti / Hi Kriti / Kriti"
-    )
-
-    print(
-        "=========================================="
-    )
-
-
-    await asyncio.Event().wait()
+        try:
+            if BOT_READY:
+                await bot_client.stop()
+        except Exception as error:
+            print(f"[SHUTDOWN] Bot client stop error: {error}", flush=True)
 
 
 # ============================================================

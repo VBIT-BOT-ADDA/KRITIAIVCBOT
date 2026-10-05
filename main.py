@@ -46,7 +46,7 @@ import edge_tts
 
 from google import genai
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.raw import functions
 from pyrogram.types import (
     InlineKeyboardMarkup,
@@ -1471,15 +1471,11 @@ async def main():
         BOT_READY = True
 
         bot_me = await bot_client.get_me()
-        print("==========================================", flush=True)
-        print("🤖 KRITIBOT STARTED SUCCESSFULLY", flush=True)
-        print("🚀 KRITIBOT STARTED - HEROKU WORKER ONLINE", flush=True)
         print(
             f"[STARTUP] BOT STARTED SUCCESSFULLY: @{bot_me.username} "
             f"(ID {bot_me.id})",
             flush=True,
         )
-        print("==========================================", flush=True)
 
         # Optional startup notification to OWNER_ID.
         if OWNER_ID:
@@ -1541,7 +1537,6 @@ async def main():
     # FINAL STATUS
     # --------------------------------------------------------
     print("==========================================", flush=True)
-    print("🤖 KRITIBOT STARTED SUCCESSFULLY", flush=True)
     print("🤖 Kriti AI Automatic Voice Chat Bot", flush=True)
     print(f"✅ Bot: {'ONLINE' if BOT_READY else 'OFFLINE'}", flush=True)
     print(
@@ -1554,9 +1549,13 @@ async def main():
     print("📚 /start = Help & Commands", flush=True)
     print("==========================================", flush=True)
 
-    # Keep the worker alive.
+    # Keep both Pyrogram clients alive and receiving updates.
+    # Pyrogram recommends idle() for event-driven applications.
+    # This is important here because both the bot and SESSION_STRING
+    # clients are running inside the same asyncio event loop.
     try:
-        await asyncio.Event().wait()
+        print("[STARTUP] KRITIBOT STARTED SUCCESSFULLY - waiting for Telegram updates...", flush=True)
+        await idle()
     finally:
         print("[SHUTDOWN] Shutdown signal received.", flush=True)
 
@@ -1585,6 +1584,7 @@ async def main():
 
 if __name__ == "__main__":
 
-    asyncio.run(
-        main()
-    )
+    # Use Pyrogram's run() so the same event loop is used by the
+    # clients and by main(). This avoids the common asyncio.run()
+    # / Pyrogram client-loop mismatch when clients are created globally.
+    bot_client.run(main())

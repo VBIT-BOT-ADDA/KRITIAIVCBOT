@@ -10,16 +10,32 @@ import random
 import pyrogram.utils as pyrogram_utils
 
 
+# Pyrogram 2.0.106 still uses old 32-bit peer-id boundaries.
+# Modern Telegram supergroups can have marked IDs such as
+# -1002299770478, so patch BOTH the constants and the helper.
+# The constant patch is important because some Pyrogram internals
+# reference the module-level ranges directly.
+pyrogram_utils.MIN_CHANNEL_ID = -10**18
+pyrogram_utils.MAX_CHANNEL_ID = -10**12
+pyrogram_utils.MIN_CHAT_ID = -10**18
+pyrogram_utils.MAX_USER_ID_OLD = 10**18
+pyrogram_utils.MAX_USER_ID = 10**18
+
+
 def _fixed_get_peer_type(peer_id: int) -> str:
-    peer_id = str(peer_id)
+    peer_id = int(peer_id)
 
-    if peer_id.startswith("-100"):
-        return "channel"
+    if peer_id < 0:
+        # Telegram marked channel/supergroup IDs use the -100... form.
+        if str(peer_id).startswith("-100"):
+            return "channel"
 
-    if peer_id.startswith("-"):
         return "chat"
 
-    return "user"
+    if peer_id > 0:
+        return "user"
+
+    raise ValueError(f"Peer id invalid: {peer_id}")
 
 
 pyrogram_utils.get_peer_type = _fixed_get_peer_type
@@ -96,6 +112,11 @@ playback_buffer = bytearray()
 playback_lock = threading.Lock()
 
 current_vc_chat_id = None
+
+# Every user is allowed to use /joinvc and /leavevc.
+# The configured SESSION_STRING user is shared, so operations are
+# serialized to prevent two users from changing the VC at the same time.
+vc_operation_lock = asyncio.Lock()
 
 is_kriti_speaking = False
 
@@ -221,11 +242,13 @@ VOICE_MAPPING = {
 # ============================================================
 
 START_TEXT = """
+<b>✅ BOT STARTED SUCCESSFULLY</b>
+
 <b>✨ Hello! I'm Kriti AI VC Bot</b>
 
 🤖 I am an AI-powered Telegram Voice Chat bot.
 
-🎙 Add me to your group and let the user account join the Voice Chat.
+🎙 Send /joinvc from the bot DM and let the configured user session join the group Voice Chat.
 
 🧠 I automatically listen to the Voice Chat.
 
@@ -255,49 +278,45 @@ Press the button below to see all commands.
 HELP_TEXT = """
 <b>📚 Kriti AI VC Bot — Help & Commands</b>
 
-<b>🎙 Join Voice Chat</b>
+<b>✅ Commands available to ALL users</b>
 
-You can send <code>/joinvc</code> directly in Kriti's DM.
+<b>1️⃣ /start</b>
+Starts the bot and shows this Help & Commands button.
 
-The bot itself does <b>NOT</b> need to be added to the target group.
-The configured user session will join the group and connect to its Voice Chat.
+<b>2️⃣ /joinvc</b>
+Makes the configured SESSION_STRING user account join the target group and connect to its already-active Voice Chat.
 
-<code>/joinvc GROUP_LINK</code>
+<b>Usage:</b>
+<code>/joinvc @groupusername</code>
 
-Examples:
-
-<code>/joinvc @mygroup</code>
-
-<code>/joinvc https://t.me/mygroup</code>
+<code>/joinvc https://t.me/group</code>
 
 <code>/joinvc https://t.me/+PRIVATE_INVITE</code>
 
-You can use a public group link or a private invite link.
-Kriti's user account will join the group when needed and connect to its active Voice Chat.
+You can send this command directly in Kriti's DM.
+The bot itself does <b>NOT</b> need to be a member or admin of the target group.
+No admin check is performed for the user who sends the command.
 
-<b>👋 Leave Voice Chat</b>
+<b>3️⃣ /leavevc</b>
+Disconnects the configured SESSION_STRING user account from the current Voice Chat.
 
+<b>Usage:</b>
 <code>/leavevc</code>
 
-Kriti will leave the current Voice Chat.
-
-<b>🤖 Automatic AI Conversation</b>
+<b>🎙 Automatic AI Conversation</b>
 
 There is NO <code>/speak</code> command.
-
-After Kriti joins the Voice Chat, she automatically listens.
+After Kriti joins an active Voice Chat, she automatically listens.
 
 Say:
+• <b>Hello Kriti</b>
+• <b>Hey Kriti</b>
+• <b>Hi Kriti</b>
+• <b>Kriti</b>
 
-• Hello Kriti
-• Hey Kriti
-• Hi Kriti
-• Kriti
-
-Then speak your message.
+Then speak normally.
 
 Kriti will:
-
 🎙 Listen
 ⬇️
 📝 Gemini converts speech to text
@@ -323,16 +342,16 @@ Hindi / Hinglish is supported as well.
 <b>👑 Creator</b>
 
 If someone asks who created Kriti, the AI will reply:
-
 <code>मुझे बनाने वाले मिस्टर बादल सर हैं।</code>
 
-<b>⚠️ Required</b>
+<b>⚠️ Important</b>
 
-• Valid user session
-• User session must be able to join the group
-• An active Voice Chat is preferred
-• If no Voice Chat exists, the user session must have permission to create one
-• GEMINI_API_KEY must be valid
+• All users can use <code>/joinvc</code> and <code>/leavevc</code>.
+• The bot does not need to be added/admin in the target group.
+• The configured SESSION_STRING account must be able to join the group.
+• The target Voice Chat should already be active.
+• Creating a brand-new Voice Chat requires Telegram's manage-call permission, so this bot does not try to bypass that permission.
+• <code>GEMINI_API_KEY</code> must be valid.
 """
 
 
@@ -1072,25 +1091,34 @@ async def create_voice_chat_if_needed(chat_id: int):
 
 async def start_user_voice_chat(chat_id: int):
     """
-    First try to join an already-active Voice Chat.
+    Join an already-active Voice Chat with the configured USER SESSION.
 
-    If there is no active call, create one with the USER ACCOUNT and
-    retry. The bot account is never used for joining the VC.
+    IMPORTANT:
+    No admin rights are requested or checked here.
+
+    Telegram requires the manage_call admin right to CREATE a new
+    Voice Chat. Therefore this bot does not try to create a new VC
+    automatically. A Voice Chat must already be active; then the
+    SESSION_STRING account attempts to join it.
     """
     try:
         await group_call.start(chat_id)
         return
-    except Exception as first_error:
-        print(f"[VC] Existing Voice Chat join failed: {first_error}")
+    except Exception as error:
+        error_text = str(error)
 
-        # Try creating a Voice Chat. This only works if the user session
-        # has permission to create one.
-        await create_voice_chat_if_needed(chat_id)
+        if (
+            "GROUPCALL_INVALID" in error_text.upper()
+            or "GROUPCALL_FORBIDDEN" in error_text.upper()
+            or "GROUPCALL_JOIN_MISSING" in error_text.upper()
+        ):
+            raise RuntimeError(
+                "No usable active Voice Chat was found. "
+                "Please start the group's Voice Chat first. "
+                "Kriti does not require admin rights to join an already-active VC."
+            ) from error
 
-        # Give Telegram a moment to propagate the new group-call update.
-        await asyncio.sleep(1.5)
-
-        await group_call.start(chat_id)
+        raise
 
 
 @bot_client.on_message(
@@ -1100,194 +1128,232 @@ async def join_voice_chat(
     client,
     message,
 ):
+    """
+    /joinvc is intentionally available to ALL users.
+
+    The command may be sent in the bot's DM or any chat where the bot
+    can receive the command. The bot itself does NOT need to be a
+    member/admin of the target group.
+
+    The actual group join and VC connection are performed by the
+    configured SESSION_STRING user account.
+    """
 
     global current_vc_chat_id
 
-    status_message = None
+    async with vc_operation_lock:
+        status_message = None
 
-    try:
-        if len(message.command) < 2:
-            await message.reply_text(
-                "❌ <b>Usage:</b>\n\n"
-                "<code>/joinvc @groupusername</code>\n\n"
-                "or\n\n"
-                "<code>/joinvc https://t.me/group</code>\n\n"
-                "or a private invite:\n\n"
-                "<code>/joinvc https://t.me/+PRIVATE_INVITE</code>\n\n"
-                "ℹ️ The bot does not need to be added to the group. "
-                "The configured user session joins the group and Voice Chat."
+        try:
+            if len(message.command) < 2:
+                await message.reply_text(
+                    "❌ <b>Usage:</b>\n\n"
+                    "<code>/joinvc @groupusername</code>\n\n"
+                    "or\n\n"
+                    "<code>/joinvc https://t.me/group</code>\n\n"
+                    "or a private invite:\n\n"
+                    "<code>/joinvc https://t.me/+PRIVATE_INVITE</code>\n\n"
+                    "ℹ️ <b>No admin is required for the bot.</b>\n"
+                    "The configured SESSION_STRING user account joins the "
+                    "group and connects to an already-active Voice Chat."
+                )
+                return
+
+            # Anyone can send this command. The bot does not need to be
+            # present in the target group.
+            group_input = message.command[1].strip()
+
+            status_message = await message.reply_text(
+                "🔄 <b>Processing group link...</b>\n\n"
+                "👤 The configured user session is joining/resolving the group."
             )
-            return
 
-        # IMPORTANT:
-        # The command can be sent directly in the BOT'S DM.
-        # The actual group join + VC connection is performed by
-        # user_client (SESSION_STRING), not bot_client.
-        group_input = message.command[1].strip()
+            # --------------------------------------------------------
+            # JOIN / RESOLVE TARGET GROUP WITH USER SESSION
+            # --------------------------------------------------------
 
-        status_message = await message.reply_text(
-            "🔄 <b>Processing group link...</b>\n\n"
-            "👤 Kriti user session is joining the group."
-        )
+            target_chat = await join_target_group(group_input)
 
-        # --------------------------------------------------------
-        # JOIN / RESOLVE TARGET GROUP WITH USER SESSION
-        # --------------------------------------------------------
+            if not target_chat:
+                raise RuntimeError(
+                    "Telegram did not return the target group."
+                )
 
-        target_chat = await join_target_group(group_input)
+            chat_id = int(target_chat.id)
+            chat_title = getattr(
+                target_chat,
+                "title",
+                None,
+            ) or "Telegram Group"
 
-        if not target_chat:
-            raise RuntimeError("Telegram did not return the target group.")
+            print(
+                f"[JoinVC] Target={chat_title!r} "
+                f"ID={chat_id} "
+                f"TYPE={getattr(target_chat, 'type', '')}"
+            )
 
-        chat_id = int(target_chat.id)
+            await status_message.edit_text(
+                f"✅ <b>Group joined/resolved.</b>\n\n"
+                f"🎙 <b>Group:</b> {chat_title}\n"
+                f"🆔 <code>{chat_id}</code>\n\n"
+                f"🔄 <b>Connecting to the active Voice Chat...</b>"
+            )
 
-        # Reject channels that cannot have a normal group Voice Chat
-        # unless Telegram/PyTgCalls accepts them.
-        chat_type = str(getattr(target_chat, "type", "")).lower()
+            # --------------------------------------------------------
+            # STOP PREVIOUS VC
+            # --------------------------------------------------------
 
-        print(
-            f"[JoinVC] Target={target_chat.title!r} "
-            f"ID={chat_id} TYPE={chat_type}"
-        )
+            if current_vc_chat_id is not None:
+                try:
+                    voice_engine.pause()
+                except Exception:
+                    pass
 
-        await status_message.edit_text(
-            f"✅ <b>Group joined/resolved.</b>\n\n"
-            f"🎙 <b>Group:</b> {target_chat.title}\n"
-            f"🆔 <code>{chat_id}</code>\n\n"
-            f"🔄 <b>Connecting user session to Voice Chat...</b>"
-        )
+                try:
+                    group_call.pause_recording()
+                except Exception:
+                    pass
 
-        # --------------------------------------------------------
-        # STOP PREVIOUS VC
-        # --------------------------------------------------------
+                try:
+                    await group_call.stop()
+                except Exception as stop_error:
+                    print(
+                        f"[Old VC Stop] {stop_error}"
+                    )
 
-        if current_vc_chat_id is not None:
+                current_vc_chat_id = None
+
+                with playback_lock:
+                    playback_buffer.clear()
+
+                await asyncio.sleep(0.5)
+
+            # --------------------------------------------------------
+            # JOIN ACTIVE VC
+            # --------------------------------------------------------
+
+            await start_user_voice_chat(chat_id)
+
+            current_vc_chat_id = chat_id
+
+            # --------------------------------------------------------
+            # WELCOME VOICE
+            # --------------------------------------------------------
+
+            welcome_file = "welcome.mp3"
+
+            try:
+                if not os.path.exists(welcome_file):
+                    await generate_speech(
+                        "Hello everyone! I am Kriti. I am ready to talk with you.",
+                        VOICE_MAPPING["en"],
+                        welcome_file,
+                    )
+
+                await queue_audio(welcome_file)
+                await wait_for_playback()
+
+            except Exception as audio_error:
+                print(
+                    f"[Welcome Audio Error] {audio_error}"
+                )
+
+            # --------------------------------------------------------
+            # START AUTOMATIC LISTENING
+            # --------------------------------------------------------
+
+            try:
+                group_call.resume_recording()
+            except Exception as recording_error:
+                print(
+                    f"[Recording Resume] {recording_error}"
+                )
+
+            voice_engine.resume()
+
+            # --------------------------------------------------------
+            # SUCCESS MESSAGE
+            # --------------------------------------------------------
+
+            await status_message.edit_text(
+                "✅ <b>Successfully joined group VC.</b>\n\n"
+                f"🎙 <b>Group:</b> {chat_title}\n"
+                f"🆔 <code>{chat_id}</code>\n\n"
+                "👤 <b>Session:</b> Connected\n"
+                "🔊 <b>Voice Chat:</b> Connected\n"
+                "🧠 <b>Gemini AI:</b> Active\n"
+                "🎙 <b>Automatic listening:</b> Active\n\n"
+                "Say <b>Hello Kriti</b>, <b>Hey Kriti</b>, "
+                "<b>Hi Kriti</b> or simply <b>Kriti</b>, "
+                "then speak normally.\n\n"
+                "ℹ️ The bot itself does <b>not</b> need to be a "
+                "member/admin of the target group."
+            )
+
+        except Exception as error:
+            print(
+                f"[Join VC Error] {error}"
+            )
+
             try:
                 voice_engine.pause()
             except Exception:
                 pass
 
             try:
-                group_call.pause_recording()
+                if current_vc_chat_id is not None:
+                    await group_call.stop()
             except Exception:
                 pass
-
-            try:
-                await group_call.stop()
-            except Exception as stop_error:
-                print(f"[Old VC Stop] {stop_error}")
 
             current_vc_chat_id = None
 
             with playback_lock:
                 playback_buffer.clear()
 
-            await asyncio.sleep(0.5)
+            error_text = str(error)
 
-        # --------------------------------------------------------
-        # JOIN EXISTING VC OR CREATE ONE IF NEEDED
-        # --------------------------------------------------------
-
-        await start_user_voice_chat(chat_id)
-
-        current_vc_chat_id = chat_id
-
-        # --------------------------------------------------------
-        # WELCOME VOICE
-        # --------------------------------------------------------
-
-        welcome_file = "welcome.mp3"
-
-        try:
-            if not os.path.exists(welcome_file):
-                await generate_speech(
-                    "Hello everyone! I am Kriti. I am ready to talk with you.",
-                    VOICE_MAPPING["en"],
-                    welcome_file,
+            if (
+                "CHAT_ADMIN_REQUIRED" in error_text.upper()
+                or "MANAGE_CALL" in error_text.upper()
+            ):
+                error_text += (
+                    "\n\nTelegram is reporting that the SESSION_STRING "
+                    "account needs the group's manage-call permission. "
+                    "That permission cannot be bypassed by code."
                 )
 
-            await queue_audio(welcome_file)
-            await wait_for_playback()
-
-        except Exception as audio_error:
-            print(f"[Welcome Audio Error] {audio_error}")
-
-        # --------------------------------------------------------
-        # START AUTOMATIC LISTENING
-        # --------------------------------------------------------
-
-        try:
-            group_call.resume_recording()
-        except Exception as recording_error:
-            print(f"[Recording Resume] {recording_error}")
-
-        voice_engine.resume()
-
-        await status_message.edit_text(
-            f"🎉 <b>Kriti is LIVE in Voice Chat!</b>\n\n"
-            f"🎙 <b>Group:</b> {target_chat.title}\n\n"
-            f"👤 <b>User session:</b> Joined\n"
-            f"🔊 <b>Voice Chat:</b> Connected\n"
-            f"🧠 <b>Gemini AI:</b> Active\n"
-            f"🎙 <b>Automatic listening:</b> Active\n\n"
-            f"Say <b>Hello Kriti</b>, <b>Hey Kriti</b>, "
-            f"<b>Hi Kriti</b> or simply <b>Kriti</b>, "
-            f"then speak normally.\n\n"
-            f"ℹ️ The bot itself does <b>not</b> need to be a member "
-            f"of this group."
-        )
-
-    except Exception as error:
-
-        print(f"[Join VC Error] {error}")
-
-        # If connecting failed after we changed state, clean it up.
-        try:
-            voice_engine.pause()
-        except Exception:
-            pass
-
-        try:
-            if current_vc_chat_id is not None:
-                await group_call.stop()
-        except Exception:
-            pass
-
-        current_vc_chat_id = None
-
-        with playback_lock:
-            playback_buffer.clear()
-
-        error_text = str(error)
-
-        if (
-            "GROUPCALL_FORBIDDEN" in error_text.upper()
-            or "GROUPCALL_INVALID" in error_text.upper()
-        ):
-            error_text += (
-                "\n\nTelegram did not allow the user session to enter/create "
-                "the Voice Chat. Make sure the group has an active Voice Chat "
-                "or that the user session has permission to create one."
-            )
-
-        if status_message:
-            try:
-                await status_message.edit_text(
-                    "❌ <b>Could not connect to the Voice Chat.</b>\n\n"
-                    f"<code>{error_text}</code>\n\n"
-                    "The bot does not need to be in the group; the "
-                    "SESSION_STRING user account must be able to join it."
+            if (
+                "GROUPCALL_INVALID" in error_text.upper()
+                or "GROUPCALL_FORBIDDEN" in error_text.upper()
+                or "GROUPCALL_JOIN_MISSING" in error_text.upper()
+            ):
+                error_text += (
+                    "\n\nMake sure the group already has an active "
+                    "Voice Chat. This version does not create a new "
+                    "Voice Chat, because Telegram requires manage-call "
+                    "admin permission to create one."
                 )
-            except Exception:
+
+            if status_message:
+                try:
+                    await status_message.edit_text(
+                        "❌ <b>Could not join the group Voice Chat.</b>\n\n"
+                        f"<code>{error_text}</code>\n\n"
+                        "👤 The configured SESSION_STRING account is used "
+                        "for the group/VC connection.\n"
+                        "👥 All users are allowed to use this command."
+                    )
+                except Exception:
+                    await message.reply_text(
+                        "❌ <b>Error joining VC:</b>\n\n"
+                        f"<code>{error_text}</code>"
+                    )
+            else:
                 await message.reply_text(
-                    f"❌ <b>Error joining VC:</b>\n\n"
+                    "❌ <b>Error joining VC:</b>\n\n"
                     f"<code>{error_text}</code>"
                 )
-        else:
-            await message.reply_text(
-                f"❌ <b>Error joining VC:</b>\n\n"
-                f"<code>{error_text}</code>"
-            )
 
 
 # ============================================================
@@ -1301,52 +1367,63 @@ async def leave_voice_chat(
     client,
     message,
 ):
+    """
+    /leavevc is available to ALL users.
+
+    It disconnects the single configured SESSION_STRING account from
+    the currently connected Voice Chat.
+    """
 
     global current_vc_chat_id
 
-    try:
-
-        if current_vc_chat_id is None:
-            await message.reply_text(
-                "ℹ️ <b>Kriti is not currently connected to a Voice Chat.</b>"
-            )
-            return
-
-        voice_engine.pause()
-
+    async with vc_operation_lock:
         try:
-            group_call.pause_recording()
-        except Exception:
-            pass
+            if current_vc_chat_id is None:
+                await message.reply_text(
+                    "ℹ️ <b>Kriti is not currently connected to a Voice Chat.</b>"
+                )
+                return
 
-        await group_call.stop()
+            voice_engine.pause()
 
-        current_vc_chat_id = None
+            try:
+                group_call.pause_recording()
+            except Exception:
+                pass
 
+            await group_call.stop()
 
-        with playback_lock:
+            current_vc_chat_id = None
 
-            playback_buffer.clear()
+            with playback_lock:
+                playback_buffer.clear()
 
+            voice_engine.resume()
 
-        voice_engine.resume()
+            await message.reply_text(
+                "✅ <b>Successfully left bot VC.</b>\n\n"
+                "👋 Kriti has disconnected from the Voice Chat."
+            )
 
+        except Exception as error:
+            print(
+                f"[Leave VC Error] {error}"
+            )
 
-        await message.reply_text(
-            "👋 <b>Left the Voice Chat!</b>"
-        )
+            current_vc_chat_id = None
 
+            with playback_lock:
+                playback_buffer.clear()
 
-    except Exception as error:
+            try:
+                voice_engine.resume()
+            except Exception:
+                pass
 
-        print(
-            f"[Leave VC Error] {error}"
-        )
-
-        await message.reply_text(
-            f"❌ <b>Error leaving VC:</b>\n\n"
-            f"<code>{error}</code>"
-        )
+            await message.reply_text(
+                "❌ <b>Error leaving VC:</b>\n\n"
+                f"<code>{error}</code>"
+            )
 
 
 # ============================================================
@@ -1366,6 +1443,10 @@ async def main():
 
     print(
         "Starting Kriti AI VC Bot..."
+    )
+
+    print(
+        "✅ BOT STARTED SUCCESSFULLY - waiting for /start"
     )
 
     print(

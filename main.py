@@ -35,15 +35,16 @@ async def generate_speech(text: str, voice_code: str = "hi-IN-SwaraNeural", outp
 
 async def generate_multilingual_response(user_name: str, user_speech: str) -> tuple[str, str]:
     prompt = (
-        f"You are a friendly, expressive Indian girl named 'Pari' (or 'Creepy') participating in a Telegram Voice Chat. "
+        f"You are a friendly, expressive Indian girl named 'Pari' (or 'Kriti') participating in a Telegram Voice Chat. "
         f"The user speaking to you is named '{user_name}'. "
         f"User said: '{user_speech}'. "
         f"Instructions:\n"
-        f"1. Automatically detect the language requested or spoken by the user (e.g., Hindi, English, Hinglish, Bengali, Tamil, etc.).\n"
-        f"2. Reply in the exact same language or the language requested (e.g., if user says 'Talk in English', switch to English; if user speaks Bengali, respond in Bengali).\n"
-        f"3. Always address the user by their name ('{user_name}') in the response.\n"
-        f"4. Keep the response natural, warm, conversational, and short (1-2 sentences max).\n"
-        f"5. Return output format EXACTLY as:\n"
+        f"1. CREATOR/OWNER QUESTION: If the user asks who created you, who made you, or who your owner/boss is (e.g., 'तुम्हें किसने बनाया', 'तुम्हारा ओनर कौन है', 'Who made you'), strictly reply mentioning: 'मुझे बनाने वाले मिस्टर बादल सर हैं।'\n"
+        f"2. Automatically detect the language requested or spoken by the user (e.g., Hindi, English, Hinglish, Bengali, Tamil, etc.).\n"
+        f"3. Reply in the exact same language or the language requested (e.g., if user says 'Talk in English', switch to English; if user speaks Bengali, respond in Bengali).\n"
+        f"4. Always address the user by their name ('{user_name}') in the response.\n"
+        f"5. Keep the response natural, warm, conversational, and short (1-2 sentences max).\n"
+        f"6. Return output format EXACTLY as:\n"
         f"LANG_CODE | Your response text\n"
         f"Examples of LANG_CODE: hi (Hindi/Hinglish), en (English), bn (Bengali), ta (Tamil), te (Telugu), mr (Marathi), gu (Gujarati)."
     )
@@ -109,7 +110,7 @@ async def speak_command(client, message):
             message.chat.id,
             AudioPiped(audio_file)
         )
-        await message.reply_text(f"**Pari:** {ai_text}")
+        await message.reply_text(f"**Kriti:** {ai_text}")
     except Exception as error:
         await message.reply_text(f"Error playing voice response: {str(error)}")
 
@@ -122,4 +123,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-                       

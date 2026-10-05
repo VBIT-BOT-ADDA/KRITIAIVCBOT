@@ -1,6 +1,5 @@
 import os
 import asyncio
-import io
 import threading
 import time
 
@@ -10,7 +9,10 @@ import edge_tts
 from google import genai
 
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 
 from pytgcalls import GroupCallFactory
 
@@ -56,26 +58,34 @@ bot_client = Client(
 
 
 # ============================================================
+# MAIN ASYNCIO LOOP
+# ============================================================
+
+MAIN_LOOP = None
+
+
+# ============================================================
 # RAW VOICE CHAT AUDIO
 # Compatible with pytgcalls==3.0.0.dev24
 # ============================================================
 
 playback_buffer = bytearray()
+
 playback_lock = threading.Lock()
 
 current_vc_chat_id = None
+
 is_kriti_speaking = False
 
 
-def on_played_data(group_call, length):
-    """
-    PyTgCalls asks this callback for outgoing PCM audio.
+# ============================================================
+# OUTGOING AUDIO CALLBACK
+# ============================================================
 
-    Audio format:
-        PCM 16-bit
-        48 kHz
-        Stereo
-    """
+def on_played_data(
+    group_call,
+    length,
+):
 
     if length <= 0:
         return b""
@@ -83,15 +93,19 @@ def on_played_data(group_call, length):
     with playback_lock:
 
         if not playback_buffer:
+
             return b"\x00" * length
 
         data = bytes(
             playback_buffer[:length]
         )
 
-        del playback_buffer[:length]
+        del playback_buffer[
+            :length
+        ]
 
     if len(data) < length:
+
         data += b"\x00" * (
             length - len(data)
         )
@@ -99,27 +113,43 @@ def on_played_data(group_call, length):
     return data
 
 
-async def on_recorded_data(
+# ============================================================
+# INCOMING AUDIO CALLBACK
+# ============================================================
+
+def raw_recorded_callback(
     group_call,
     frame,
     length,
 ):
-    """
-    Incoming Voice Chat audio callback.
-    """
+
+    global MAIN_LOOP
 
     if not frame:
         return
 
     if length:
+
         frame = frame[:length]
+
+    if MAIN_LOOP is None:
+        return
 
     try:
 
-        await voice_engine.handle_frame(
-            frame,
-            handle_kriti_trigger,
+        future = (
+            asyncio.run_coroutine_threadsafe(
+                voice_engine.handle_frame(
+                    frame,
+                    handle_kriti_trigger,
+                ),
+                MAIN_LOOP,
+            )
         )
+
+        # We intentionally do not wait here.
+        # The PyTgCalls native audio thread
+        # must remain free.
 
     except Exception as error:
 
@@ -128,34 +158,9 @@ async def on_recorded_data(
         )
 
 
-def raw_recorded_callback(
-    group_call,
-    frame,
-    length,
-):
-    """
-    PyTgCalls calls this from its native audio thread.
-
-    Schedule the async voice-engine handler
-    safely on the main asyncio loop.
-    """
-
-    try:
-
-        loop = asyncio.get_running_loop()
-
-    except RuntimeError:
-
-        return
-
-    loop.create_task(
-        on_recorded_data(
-            group_call,
-            frame,
-            length,
-        )
-    )
-
+# ============================================================
+# GROUP CALL
+# ============================================================
 
 group_call = GroupCallFactory(
     user_client
@@ -170,13 +175,21 @@ group_call = GroupCallFactory(
 # ============================================================
 
 VOICE_MAPPING = {
+
     "hi": "hi-IN-SwaraNeural",
+
     "en": "en-IN-NeerjaNeural",
+
     "bn": "bn-IN-TanishaaNeural",
+
     "ta": "ta-IN-PallaviNeural",
+
     "te": "te-IN-ShrutiNeural",
+
     "mr": "mr-IN-AarohiNeural",
+
     "gu": "gu-IN-DhwaniNeural",
+
     "default": "hi-IN-SwaraNeural",
 }
 
@@ -195,13 +208,16 @@ START_TEXT = """
 🧠 I automatically listen to the Voice Chat.
 
 💬 Say:
+
 <b>Hello Kriti</b>
 <b>Hey Kriti</b>
 <b>Hi Kriti</b>
+
 or simply
+
 <b>Kriti</b>
 
-Kriti will understand your speech using AI and automatically reply with her voice.
+Kriti will understand your speech using Gemini AI and automatically reply with her voice.
 
 🧠 Powered by Gemini AI
 🔊 Multilingual Voice Support
@@ -211,15 +227,16 @@ Press the button below to see all commands.
 
 
 # ============================================================
-# HELP MESSAGE
+# HELP
 # ============================================================
 
 HELP_TEXT = """
 <b>📚 Kriti AI VC Bot — Help & Commands</b>
 
-<b>🎙 Voice Chat</b>
 
-<code>/joinvc @username</code>
+<b>🎙 Join Voice Chat</b>
+
+<code>/joinvc @groupusername</code>
 
 Kriti's user account will join the Voice Chat of the specified group.
 
@@ -245,7 +262,7 @@ There is NO <code>/speak</code> command.
 
 After Kriti joins the Voice Chat, she automatically listens.
 
-Say one of these:
+Say:
 
 • Hello Kriti
 • Hey Kriti
@@ -258,23 +275,29 @@ Kriti will:
 
 🎙 Listen
 ⬇️
-📝 Convert speech to text
+📝 Gemini converts speech to text
 ⬇️
-🧠 Ask Gemini AI
+🧠 Gemini AI generates a response
 ⬇️
-🔊 Generate voice
+🔊 Edge TTS generates voice
 ⬇️
-🎙 Speak back in the Voice Chat
+🎙 Kriti speaks back in the Voice Chat
 
 
 <b>🌐 Supported Languages</b>
 
 🇮🇳 Hindi
+
 🇬🇧 English
+
 🇧🇩 Bengali
+
 🇮🇳 Tamil
+
 🇮🇳 Telugu
+
 🇮🇳 Marathi
+
 🇮🇳 Gujarati
 
 Hindi / Hinglish is supported as well.
@@ -287,19 +310,17 @@ If someone asks who created Kriti, the AI will reply:
 <code>मुझे बनाने वाले मिस्टर बादल सर हैं।</code>
 
 
-<b>⚠️ Important</b>
+<b>⚠️ Required</b>
 
-• The user account session must be valid.
-• The user account must have access to the target group.
-• The Voice Chat must be available.
-• Kriti must be connected to the Voice Chat.
-• GEMINI_API_KEY must be valid.
-• GROQ_API_KEY must be valid.
+• Valid user session
+• User account must have access to the group
+• Voice Chat must be active
+• GEMINI_API_KEY must be valid
 """
 
 
 # ============================================================
-# TTS
+# TEXT TO SPEECH
 # ============================================================
 
 async def generate_speech(
@@ -327,12 +348,6 @@ async def generate_speech(
 def mp3_to_pcm(
     file_path: str,
 ) -> bytes:
-    """
-    Convert Edge-TTS MP3 to:
-        PCM signed 16-bit
-        48000 Hz
-        stereo
-    """
 
     output = bytearray()
 
@@ -347,18 +362,23 @@ def mp3_to_pcm(
         for stream in container.streams:
 
             if stream.type == "audio":
+
                 audio_stream = stream
+
                 break
 
         if audio_stream is None:
+
             raise RuntimeError(
                 "No audio stream found."
             )
 
-        resampler = av.audio.resampler.AudioResampler(
-            format="s16",
-            layout="stereo",
-            rate=48000,
+        resampler = (
+            av.audio.resampler.AudioResampler(
+                format="s16",
+                layout="stereo",
+                rate=48000,
+            )
         )
 
         for frame in container.decode(
@@ -374,11 +394,13 @@ def mp3_to_pcm(
             for converted in converted_frames:
 
                 for plane in converted.planes:
+
                     output.extend(
                         bytes(plane)
                     )
 
         # Flush resampler
+
         converted_frames = (
             resampler.resample(None)
         )
@@ -386,6 +408,7 @@ def mp3_to_pcm(
         for converted in converted_frames:
 
             for plane in converted.planes:
+
                 output.extend(
                     bytes(plane)
                 )
@@ -398,7 +421,7 @@ def mp3_to_pcm(
 
 
 # ============================================================
-# ADD AUDIO TO PLAYBACK BUFFER
+# QUEUE AUDIO
 # ============================================================
 
 async def queue_audio(
@@ -413,6 +436,7 @@ async def queue_audio(
     )
 
     if not pcm_data:
+
         raise RuntimeError(
             "Converted PCM audio is empty."
         )
@@ -424,7 +448,7 @@ async def queue_audio(
         )
 
     print(
-        f"[Audio] Added {len(pcm_data)} bytes to VC playback."
+        f"[Audio] Added {len(pcm_data)} bytes to playback buffer."
     )
 
 
@@ -437,19 +461,19 @@ async def wait_for_playback():
     while True:
 
         with playback_lock:
+
             remaining = len(
                 playback_buffer
             )
 
         if remaining <= 0:
+
             break
 
         await asyncio.sleep(
             0.1
         )
 
-    # Small safety delay so the final audio
-    # frame reaches Telegram.
     await asyncio.sleep(
         0.35
     )
@@ -464,37 +488,84 @@ async def generate_multilingual_response(
     user_speech: str,
 ) -> tuple[str, str]:
 
-    prompt = (
-        f"You are a friendly, expressive Indian girl named "
-        f"'Kriti' participating in a Telegram Voice Chat.\n\n"
+    prompt = f"""
+You are Kriti, a friendly Indian AI girl
+participating in a Telegram Voice Chat.
 
-        f"The user speaking to you is named: {user_name}\n"
-        f"User said: {user_speech}\n\n"
+The user speaking to you is:
 
-        f"Instructions:\n"
+{user_name}
 
-        f"1. CREATOR/OWNER QUESTION:\n"
-        f"If the user asks who created you, who made you, "
-        f"who your owner is, or who your boss is, "
-        f"strictly mention:\n"
-        f"'मुझे बनाने वाले मिस्टर बादल सर हैं।'\n\n"
+The user said:
 
-        f"2. Detect the language spoken or requested by the user.\n\n"
+{user_speech}
 
-        f"3. Reply in the same language or requested language.\n\n"
 
-        f"4. Always address the user by their name: "
-        f"{user_name}\n\n"
+IMPORTANT INSTRUCTIONS:
 
-        f"5. Keep the response natural, friendly and short.\n"
-        f"Maximum 1-2 sentences.\n\n"
 
-        f"6. Return EXACTLY this format:\n"
-        f"LANG_CODE | Response text\n\n"
+1. CREATOR QUESTION
 
-        f"Supported language codes:\n"
-        f"hi, en, bn, ta, te, mr, gu"
-    )
+If the user asks:
+
+Who created you?
+Who made you?
+Who is your owner?
+Who is your boss?
+Who developed you?
+
+You MUST mention exactly:
+
+मुझे बनाने वाले मिस्टर बादल सर हैं।
+
+
+2. LANGUAGE
+
+Detect the language of the user.
+
+Reply in the same language.
+
+Supported:
+
+Hindi
+English
+Bengali
+Tamil
+Telugu
+Marathi
+Gujarati
+Hinglish
+
+
+3. USER NAME
+
+Address the user naturally by their name when appropriate.
+
+
+4. RESPONSE LENGTH
+
+Keep the response short and natural.
+
+Maximum 1-2 sentences.
+
+
+5. OUTPUT FORMAT
+
+Return EXACTLY:
+
+LANG_CODE | Response
+
+
+Supported language codes:
+
+hi
+en
+bn
+ta
+te
+mr
+gu
+"""
 
     try:
 
@@ -518,14 +589,14 @@ async def generate_multilingual_response(
 
         return (
             "hi",
-            f"{user_name}, अभी AI response में problem आ गई है।"
+            f"{user_name}, अभी AI response में problem आ गई है।",
         )
 
     if not raw_output:
 
         return (
             "hi",
-            f"{user_name}, अभी मुझे response नहीं मिला।"
+            f"{user_name}, अभी मुझे response नहीं मिला।",
         )
 
     if "|" in raw_output:
@@ -567,9 +638,11 @@ async def handle_kriti_trigger(
     global is_kriti_speaking
 
     if is_kriti_speaking:
+
         return
 
     if not current_vc_chat_id:
+
         return
 
     is_kriti_speaking = True
@@ -578,18 +651,23 @@ async def handle_kriti_trigger(
         f"[Kriti Trigger] {user_speech}"
     )
 
-    # Stop incoming recording while Kriti speaks.
     voice_engine.pause()
 
     try:
 
+        # Stop listening while Kriti speaks
+
         try:
+
             group_call.pause_recording()
+
         except Exception:
+
             pass
 
+
         # ----------------------------------------------------
-        # Gemini
+        # Gemini AI response
         # ----------------------------------------------------
 
         user_name = "Friend"
@@ -602,20 +680,27 @@ async def handle_kriti_trigger(
         )
 
         if not ai_text:
+
             return
 
         print(
             f"[Kriti Response] {ai_text}"
         )
 
+
         # ----------------------------------------------------
-        # TTS
+        # Select TTS voice
         # ----------------------------------------------------
 
         voice = VOICE_MAPPING.get(
             lang_code,
             VOICE_MAPPING["default"],
         )
+
+
+        # ----------------------------------------------------
+        # Generate TTS
+        # ----------------------------------------------------
 
         timestamp = int(
             time.time() * 1000
@@ -631,13 +716,15 @@ async def handle_kriti_trigger(
             response_file,
         )
 
+
         # ----------------------------------------------------
-        # Convert + queue
+        # Add audio to VC
         # ----------------------------------------------------
 
         await queue_audio(
             response_file
         )
+
 
         # ----------------------------------------------------
         # Wait until Kriti finishes speaking
@@ -645,8 +732,9 @@ async def handle_kriti_trigger(
 
         await wait_for_playback()
 
+
         # ----------------------------------------------------
-        # Cleanup
+        # Delete temporary response
         # ----------------------------------------------------
 
         try:
@@ -654,12 +742,15 @@ async def handle_kriti_trigger(
             if os.path.exists(
                 response_file
             ):
+
                 os.remove(
                     response_file
                 )
 
         except Exception:
+
             pass
+
 
     except Exception as error:
 
@@ -667,13 +758,17 @@ async def handle_kriti_trigger(
             f"[Kriti Voice Error] {error}"
         )
 
+
     finally:
 
         is_kriti_speaking = False
 
         try:
+
             group_call.resume_recording()
+
         except Exception:
+
             pass
 
         voice_engine.resume()
@@ -684,7 +779,7 @@ async def handle_kriti_trigger(
 
 
 # ============================================================
-# START COMMAND
+# /START
 # ============================================================
 
 @bot_client.on_message(
@@ -792,7 +887,7 @@ async def back_start(
 
 
 # ============================================================
-# /joinvc
+# /JOINVC
 # ============================================================
 
 @bot_client.on_message(
@@ -818,9 +913,11 @@ async def join_voice_chat(
 
             return
 
+
         chat_identifier = (
             message.command[1]
         )
+
 
         status_message = (
             await message.reply_text(
@@ -828,29 +925,36 @@ async def join_voice_chat(
             )
         )
 
+
         target_chat = (
             await user_client.get_chat(
                 chat_identifier
             )
         )
 
+
         chat_id = target_chat.id
 
+
         # ----------------------------------------------------
-        # Join VC
+        # Join Voice Chat
         # ----------------------------------------------------
 
         await group_call.start(
             chat_id
         )
 
+
         current_vc_chat_id = chat_id
+
 
         # ----------------------------------------------------
         # Welcome voice
         # ----------------------------------------------------
 
-        welcome_file = "welcome.mp3"
+        welcome_file = (
+            "welcome.mp3"
+        )
 
         try:
 
@@ -876,13 +980,21 @@ async def join_voice_chat(
                 f"[Welcome Audio Error] {audio_error}"
             )
 
-        # Make sure recording is active.
+
+        # ----------------------------------------------------
+        # Start listening
+        # ----------------------------------------------------
+
         try:
+
             group_call.resume_recording()
+
         except Exception:
+
             pass
 
         voice_engine.resume()
+
 
         await status_message.edit_text(
             f"✅ <b>Successfully joined Voice Chat!</b>\n\n"
@@ -894,6 +1006,7 @@ async def join_voice_chat(
             f"or simply <b>Kriti</b> "
             f"to start talking."
         )
+
 
     except Exception as error:
 
@@ -908,7 +1021,7 @@ async def join_voice_chat(
 
 
 # ============================================================
-# /leavevc
+# /LEAVEVC
 # ============================================================
 
 @bot_client.on_message(
@@ -926,22 +1039,32 @@ async def leave_voice_chat(
         voice_engine.pause()
 
         try:
+
             group_call.pause_recording()
+
         except Exception:
+
             pass
+
 
         await group_call.stop()
 
+
         current_vc_chat_id = None
 
+
         with playback_lock:
+
             playback_buffer.clear()
 
+
         voice_engine.resume()
+
 
         await message.reply_text(
             "👋 <b>Left the Voice Chat!</b>"
         )
+
 
     except Exception as error:
 
@@ -961,29 +1084,86 @@ async def leave_voice_chat(
 
 async def main():
 
+    global MAIN_LOOP
+
+    MAIN_LOOP = asyncio.get_running_loop()
+
+
+    print(
+        "=========================================="
+    )
+
     print(
         "Starting Kriti AI VC Bot..."
     )
 
+    print(
+        "=========================================="
+    )
+
+
+    # --------------------------------------------------------
+    # Start user account
+    # --------------------------------------------------------
+
     await user_client.start()
 
     print(
-        "User account started."
+        "✅ User account started."
     )
+
+
+    # --------------------------------------------------------
+    # Start bot
+    # --------------------------------------------------------
 
     await bot_client.start()
 
     print(
-        "Bot account started."
+        "✅ Bot account started."
+    )
+
+
+    print(
+        "=========================================="
     )
 
     print(
-        "Kriti AI Automatic Voice Chat Bot is active!"
+        "🤖 Kriti AI Automatic Voice Chat Bot"
     )
 
     print(
-        "Waiting for: Hello Kriti / Hey Kriti / Hi Kriti / Kriti"
+        "🎙 Voice detection: ACTIVE"
     )
+
+    print(
+        "🧠 Gemini STT: ACTIVE"
+    )
+
+    print(
+        "🧠 Gemini AI: ACTIVE"
+    )
+
+    print(
+        "🔊 Edge TTS: ACTIVE"
+    )
+
+    print(
+        "=========================================="
+    )
+
+    print(
+        "Waiting for:"
+    )
+
+    print(
+        "Hello Kriti / Hey Kriti / Hi Kriti / Kriti"
+    )
+
+    print(
+        "=========================================="
+    )
+
 
     await asyncio.Event().wait()
 
